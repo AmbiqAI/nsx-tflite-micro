@@ -33,16 +33,16 @@ set_property(CACHE NSX_TFLITE_MICRO_VARIANT PROPERTY STRINGS
     "debug" "release-with-logs" "release")
 string(REPLACE "-" "_" _nsx_tflite_micro_build_type "${NSX_TFLITE_MICRO_VARIANT}")
 
-# TFLITE_MICRO_ROOT is normally the sibling helia-rt project in an NSX
+# TFLITE_MICRO_ROOT is normally the sibling helia-rt-source project in an NSX
 # workspace. Keep HELIA_RT_TFLM_ROOT as a compatibility alias for profiler
 # and existing source-build scripts.
 if(NOT TFLITE_MICRO_ROOT AND HELIA_RT_TFLM_ROOT)
     set(TFLITE_MICRO_ROOT "${HELIA_RT_TFLM_ROOT}")
 endif()
-set(_nsx_tflite_micro_default_root "${CMAKE_CURRENT_LIST_DIR}/../helia-rt")
 set(_nsx_tflite_micro_root_candidates
     "${TFLITE_MICRO_ROOT}"
-    "${_nsx_tflite_micro_default_root}"
+    "${CMAKE_CURRENT_LIST_DIR}/../helia-rt-source"
+    "${CMAKE_CURRENT_LIST_DIR}/../helia-rt"
     "${CMAKE_CURRENT_LIST_DIR}")
 
 set(_nsx_tflite_micro_root "")
