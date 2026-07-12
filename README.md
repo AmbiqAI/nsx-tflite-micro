@@ -6,8 +6,9 @@ selecting the Ambiq `helia` backend. It supports:
 - `NSX_TFLITE_MICRO_BACKEND=reference`
 - `NSX_TFLITE_MICRO_BACKEND=cmsis_nn`
 
-The source tree is resolved from a sibling `helia-rt` checkout by default, or
-from `-DTFLITE_MICRO_ROOT=/path/to/helia-rt`.
+The required `helia-rt-source` module vendors Helia-RT beside this module, so
+the source tree resolves automatically in an NSX app. An explicit
+`-DTFLITE_MICRO_ROOT=/path/to/helia-rt` still overrides that default.
 
 For standard CMSIS-NN, add the `arm-cmsis-nn` module before this module. The
 wrapper exports `nsx::arm_cmsis_nn`; set `ARM_CMSIS_NN_ROOT` and, when needed,
