@@ -1,0 +1,56 @@
+schema_version: 1
+
+module:
+  name: nsx-tflite-micro
+  type: runtime
+  version: "0.1.0"
+
+support:
+  ambiqsuite: true
+  zephyr: false
+
+summary: >-
+  Thin NSX wrapper for the helia-rt TensorFlow Lite Micro runtime using
+  reference kernels or standard Arm CMSIS-NN kernels.
+
+capabilities:
+  - inference
+  - tflm
+  - machine_learning
+  - profiling
+
+use_cases:
+  - TFLM inference on Ambiq SoCs
+  - reference-versus-CMSIS-NN kernel comparisons
+  - helia-profiler runtime measurements
+
+agent_keywords:
+  - tflm
+  - tensorflow
+  - tflite
+  - cmsis-nn
+  - profiling
+  - helia-profiler
+
+build:
+  cmake:
+    package: nsx_tflite_micro
+    targets:
+      - nsx::tflite_micro
+
+depends:
+  required:
+    - nsx-core
+    - nsx-soc-hal
+  optional:
+    - arm-cmsis-nn
+
+compatibility:
+  boards:
+    - "*"
+  socs:
+    - "*"
+  toolchains:
+    - arm-none-eabi-gcc
+    - armclang
+    - atfe
