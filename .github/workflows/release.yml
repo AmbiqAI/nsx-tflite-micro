@@ -1,0 +1,326 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild its source archive
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.tag == '') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      initial_release_published: ${{ steps.release-state.outputs.initial_release_published }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+
+      - name: Validate initial immutable tag
+        id: release-state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INITIAL_RELEASE_PR: "2"
+        run: |
+          if ! git ls-remote --exit-code origin refs/tags/v0.1.0 >/dev/null 2>&1; then
+            echo "initial_release_published=false" >> "$GITHUB_OUTPUT"
+            echo "Initial v0.1.0 is not published; release automation remains gated."
+            exit 0
+          fi
+
+          git fetch --no-tags origin refs/tags/v0.1.0:refs/tags/v0.1.0
+          test "$(git cat-file -t refs/tags/v0.1.0)" = "tag"
+          tagged_commit="$(git rev-parse refs/tags/v0.1.0^{commit})"
+          pr_merged="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${INITIAL_RELEASE_PR}" \
+            --jq '.merged')"
+          test "$pr_merged" = "true"
+          merged_at="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${INITIAL_RELEASE_PR}" \
+            --jq '.merged_at')"
+          test -n "$merged_at"
+          test "$merged_at" != "null"
+          reviewed_commit="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${INITIAL_RELEASE_PR}" \
+            --jq '.merge_commit_sha')"
+          test -n "$reviewed_commit"
+          test "$reviewed_commit" != "null"
+          test "$tagged_commit" = "$reviewed_commit"
+
+          tag_version="$(git show "${tagged_commit}:version.txt" | tr -d '[:space:]')"
+          module_version="$(git show "${tagged_commit}:nsx-module.yaml" \
+            | sed -n 's/^  version: "\(.*\)"/\1/p' | head -1)"
+          manifest_version="$(git show \
+            "${tagged_commit}:.release-please-manifest.json" | jq -r '."."')"
+          test "$tag_version" = "0.1.0"
+          test "$tag_version" = "$module_version"
+          test "$tag_version" = "$manifest_version"
+          echo "Validated v0.1.0 against merged PR #${INITIAL_RELEASE_PR} at ${tagged_commit}."
+          echo "initial_release_published=true" >> "$GITHUB_OUTPUT"
+
+  release-please:
+    needs: bootstrap
+    if: ${{ needs.bootstrap.result == 'success' && needs.bootstrap.outputs.initial_release_published == 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.tag == '')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
+
+  dispatch-release-pr-ci:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.pr != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_JSON: ${{ needs.release-please.outputs.pr }}
+    steps:
+      - name: Dispatch CI on release PR branch
+        shell: bash
+        run: |
+          branch="$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')"
+          test -n "$branch"
+          gh workflow run ci.yml --ref "$branch" --repo "$GITHUB_REPOSITORY"
+
+  publish-release:
+    needs:
+      - bootstrap
+      - release-please
+    if: >-
+      ${{ always() &&
+          needs.bootstrap.outputs.initial_release_published == 'true' &&
+          needs.release-please.result == 'success' &&
+          github.event_name == 'push' &&
+          startsWith(github.event.head_commit.message, 'chore(main): release nsx-tflite-micro ') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout release candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Validate release candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
+          test "$version" = "$(tr -d '[:space:]' < version.txt)"
+          test "$version" = "$(jq -r '."."' .release-please-manifest.json)"
+          release_tag="v${version}"
+          if git ls-remote --exit-code origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
+            echo "Release tag ${release_tag} already exists; refusing to retarget it."
+            exit 1
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for successful main CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_sha="${GITHUB_SHA}"
+          for attempt in $(seq 1 60); do
+            runs="$(gh run list --workflow ci.yml --event push \
+              --commit "$release_sha" \
+              --json databaseId,status,conclusion,headSha --limit 20)"
+            run_id="$(printf '%s' "$runs" | jq -r --arg sha "$release_sha" \
+              '.[] | select(.headSha == $sha) | .databaseId' | head -1)"
+            if [ -z "$run_id" ]; then
+              echo "Waiting for CI run on ${release_sha} (${attempt}/60)"
+              sleep 30
+              continue
+            fi
+            run_state="$(printf '%s' "$runs" | jq -r --arg id "$run_id" \
+              '.[] | select((.databaseId|tostring) == $id) | "\(.status)|\(.conclusion)"')"
+            case "$run_state" in
+              completed\|success)
+                echo "CI run ${run_id} succeeded for ${release_sha}."
+                exit 0
+                ;;
+              completed\|*)
+                echo "CI run ${run_id} failed: ${run_state}"
+                exit 1
+                ;;
+              *)
+                echo "CI run ${run_id} is ${run_state} (${attempt}/60)"
+                sleep 30
+                ;;
+            esac
+          done
+          echo "Timed out waiting for CI on ${release_sha}."
+          exit 1
+
+      - name: Create immutable annotated tag
+        env:
+          RELEASE_TAG: ${{ steps.candidate.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" "$GITHUB_SHA" -m "Release $RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
+
+      - name: Create source archive
+        env:
+          RELEASE_TAG: ${{ steps.candidate.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="nsx-tflite-micro-${RELEASE_TAG#v}.tar.gz"
+          git archive --format=tar.gz \
+            --prefix="nsx-tflite-micro-${RELEASE_TAG#v}/" \
+            "$RELEASE_TAG" -o "$archive"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Upload source archive
+        env:
+          RELEASE_TAG: ${{ steps.candidate.outputs.release_tag }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ env.ARCHIVE }}
+          generate_release_notes: true
+
+  validate-rebuild-ci:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    outputs:
+      validated_sha: ${{ steps.validate-sha.outputs.validated_sha }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Validate immutable tag target
+        id: validate-sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "Expected an existing vMAJOR.MINOR.PATCH tag"; exit 1 ;;
+          esac
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = "tag"
+          tagged_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$tagged_commit" = "$(git rev-parse HEAD)"
+          echo "validated_sha=${tagged_commit}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for successful tagged-commit CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse HEAD)"
+          for attempt in $(seq 1 60); do
+            runs="$(gh run list --workflow ci.yml --commit "$release_sha" \
+              --json databaseId,status,conclusion,headSha --limit 20)"
+            run_id="$(printf '%s' "$runs" | jq -r --arg sha "$release_sha" \
+              '.[] | select(.headSha == $sha) | .databaseId' | head -1)"
+            if [ -z "$run_id" ]; then
+              echo "Waiting for CI run on ${release_sha} (${attempt}/60)"
+              sleep 30
+              continue
+            fi
+
+            run_state="$(printf '%s' "$runs" | jq -r --arg id "$run_id" \
+              '.[] | select((.databaseId|tostring) == $id) | "\(.status)|\(.conclusion)"')"
+            case "$run_state" in
+              completed\|success)
+                echo "CI run ${run_id} succeeded for ${release_sha}."
+                exit 0
+                ;;
+              completed\|*)
+                echo "CI run ${run_id} failed: ${run_state}"
+                exit 1
+                ;;
+              *)
+                echo "CI run ${run_id} is ${run_state} (${attempt}/60)"
+                sleep 30
+                ;;
+            esac
+          done
+          echo "Timed out waiting for CI on ${release_sha}."
+          exit 1
+
+  rebuild-archive:
+    needs: validate-rebuild-ci
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.tag != '' && needs.validate-rebuild-ci.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      VALIDATED_SHA: ${{ needs.validate-rebuild-ci.outputs.validated_sha }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = "tag"
+          tagged_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$tagged_commit" = "$VALIDATED_SHA"
+          test "$tagged_commit" = "$(git rev-parse HEAD)"
+          version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
+          test "$version" = "$(tr -d '[:space:]' < version.txt)"
+          test "$version" = "${RELEASE_TAG#v}"
+
+      - name: Create source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="nsx-tflite-micro-${RELEASE_TAG#v}.tar.gz"
+          git archive --format=tar.gz \
+            --prefix="nsx-tflite-micro-${RELEASE_TAG#v}/" \
+            "$RELEASE_TAG" -o "$archive"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Upload source archive
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ env.ARCHIVE }}

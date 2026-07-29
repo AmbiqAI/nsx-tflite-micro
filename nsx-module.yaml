@@ -13,6 +13,12 @@ summary: >-
   Thin NSX wrapper for the helia-rt TensorFlow Lite Micro runtime using
   reference kernels or standard Arm CMSIS-NN kernels.
 
+license:
+  type: BSD-3-Clause
+  note: >-
+    This repository contains the NSX adapter. Helia-RT, TFLM, and CMSIS-NN
+    sources are supplied by separate dependencies and retain their own notices.
+
 capabilities:
   - inference
   - tflm
