@@ -39,5 +39,14 @@ foreach(_required IN ITEMS CHANGELOG.md LICENSE PROVENANCE.md RELEASE.md version
     endif()
 endforeach()
 
+file(READ "${_root}/PROVENANCE.md" _provenance)
+foreach(_pin IN ITEMS
+    "7c1b162c0fd2336876b69daaa20c87a1e7e2f508"
+    "41e0cf520fe68d5e22298f98e1a0ffda1196f8d8")
+    if(NOT _provenance MATCHES "${_pin}")
+        message(FATAL_ERROR "Missing pinned dependency provenance: ${_pin}")
+    endif()
+endforeach()
+
 message(STATUS
     "Release metadata contract passed for nsx-tflite-micro ${_module_version}")

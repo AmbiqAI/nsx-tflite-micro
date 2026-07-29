@@ -62,14 +62,33 @@ The `reference` backend has no additional kernel dependency. For
 | Ambiq Helia backend | Not selected by this module |
 | NSX platform | AmbiqSuite through `nsx-soc-hal` |
 | Boards and SoCs | Delegated to the selected NSX board/SoC modules |
-| Toolchains | `arm-none-eabi-gcc`, Arm Compiler 6 (`armclang`), ATfE |
+| Declared toolchains | `arm-none-eabi-gcc`, Arm Compiler 6 (`armclang`), ATfE |
 | Zephyr | Not supported by this adapter |
 
-The toolchain and backend declarations describe the supported integration
-surface. Device-specific qualification, operator coverage, and performance
-claims remain responsibilities of the pinned Helia-RT and CMSIS-NN sources.
-The immutable dependency identities used for the initial release are recorded
-in [PROVENANCE.md](PROVENANCE.md).
+The backend and toolchain declarations describe the supported integration
+surface, not a complete device-certification matrix. Device-specific
+qualification, operator coverage, and performance claims remain
+responsibilities of the pinned Helia-RT and CMSIS-NN sources. The immutable
+dependency identities used for the initial release are recorded in
+[PROVENANCE.md](PROVENANCE.md).
+
+## Qualification scope for v0.1.0
+
+Hosted CI uses host compilers and empty board/HAL interface targets to verify
+the CMake target graph, source selection, and link contract. Those jobs do not
+qualify a board, SoC, or production HAL.
+
+The release preparation additionally completed these local source-build
+smokes:
+
+- Arm GNU Embedded GCC: Cortex-M4 reference and CMSIS-NN archive/glue builds.
+- Arm Compiler 6 (`armclang`): Cortex-M4 reference archive/glue build.
+- Host Clang: reference and real pinned CMSIS-NN build/link smokes.
+
+ATfE was declared in the module compatibility metadata but was not installed
+in the validation environment, and no physical-board or hardware-in-the-loop
+qualification was performed. These remain deferred before making device-level
+support or performance claims.
 
 ## Profiling
 
