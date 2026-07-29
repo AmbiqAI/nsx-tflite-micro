@@ -192,8 +192,63 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           files: ${{ env.ARCHIVE }}
 
-  rebuild-archive:
+  validate-rebuild-ci:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 1
+
+      - name: Wait for successful tagged-commit CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse HEAD)"
+          for attempt in $(seq 1 60); do
+            runs="$(gh run list --workflow ci.yml --commit "$release_sha" \
+              --json databaseId,status,conclusion,headSha --limit 20)"
+            run_id="$(printf '%s' "$runs" | jq -r --arg sha "$release_sha" \
+              '.[] | select(.headSha == $sha) | .databaseId' | head -1)"
+            if [ -z "$run_id" ]; then
+              echo "Waiting for CI run on ${release_sha} (${attempt}/60)"
+              sleep 30
+              continue
+            fi
+
+            run_state="$(printf '%s' "$runs" | jq -r --arg id "$run_id" \
+              '.[] | select((.databaseId|tostring) == $id) | "\(.status)|\(.conclusion)"')"
+            case "$run_state" in
+              completed\|success)
+                echo "CI run ${run_id} succeeded for ${release_sha}."
+                exit 0
+                ;;
+              completed\|*)
+                echo "CI run ${run_id} failed: ${run_state}"
+                exit 1
+                ;;
+              *)
+                echo "CI run ${run_id} is ${run_state} (${attempt}/60)"
+                sleep 30
+                ;;
+            esac
+          done
+          echo "Timed out waiting for CI on ${release_sha}."
+          exit 1
+
+  rebuild-archive:
+    needs: validate-rebuild-ci
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.tag != '' && needs.validate-rebuild-ci.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

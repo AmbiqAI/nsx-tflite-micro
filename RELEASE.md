@@ -12,6 +12,8 @@ coherent.
   the reviewed commit containing the matching module version.
 - A published tag or GitHub release must never be moved or deleted.
 - The source archive is generated from the exact release tag.
+- Manual archive rebuilds are allowed only after the tagged commit has a
+  successful hosted CI run.
 - Dependency revisions are recorded in the downstream registry; changing a
   dependency pin is a separate NeuralSPOTX change and is not part of this
   module release.
