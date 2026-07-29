@@ -1,6 +1,7 @@
 # Release policy
 
-`nsx-tflite-micro` uses SemVer and Release Please. The module version in
+`nsx-tflite-micro` uses SemVer and Release Please for release PRs. A separate
+controlled publisher creates tags and releases only after CI. The module version in
 `nsx-module.yaml`, `version.txt`, and the Release Please manifest must remain
 identical. `version.txt` is the scalar version file required by Release
 Please's `simple` strategy; the YAML entry keeps the NSX catalog metadata
@@ -33,11 +34,12 @@ coherent.
 6. Merge the preparation PR using the repository's squash-merge policy.
 7. After explicit maintainer approval, publish the annotated immutable
    `v0.1.0` tag and GitHub release from the reviewed PR #2 merge commit using
-   the repository's controlled release procedure. The Release Please workflow
-   is intentionally gated until this exact tag/commit/metadata tuple exists.
+   the repository's    controlled release procedure. The Release Please PR workflow is
+   intentionally gated until this exact tag/commit/metadata tuple exists.
 8. Verify the tag, commit, archive, and release assets before updating any
-   downstream registry pin. Subsequent versions are then derived solely from
-   Conventional Commits by Release Please.
+   downstream registry pin. Subsequent versions are derived from Conventional
+   Commits by Release Please, then published by the CI-gated controlled
+   publisher.
 
 This preparation change intentionally does not publish a tag, GitHub release,
 or NeuralSPOTX registry update.

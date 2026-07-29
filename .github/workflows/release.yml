@@ -69,10 +69,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      actions: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
       pr: ${{ steps.release.outputs.pr }}
     steps:
       - name: Run Release Please
@@ -81,44 +78,70 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-release: true
 
-      # GITHUB_TOKEN-created PRs do not trigger pull_request workflows. Dispatch
-      # CI explicitly so the release PR has the same validation gate as normal
-      # pull requests.
+  dispatch-release-pr-ci:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.pr != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_JSON: ${{ needs.release-please.outputs.pr }}
+    steps:
       - name: Dispatch CI on release PR branch
-        if: ${{ steps.release.outputs.pr }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_JSON: ${{ steps.release.outputs.pr }}
+        shell: bash
         run: |
           branch="$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')"
           test -n "$branch"
           gh workflow run ci.yml --ref "$branch" --repo "$GITHUB_REPOSITORY"
 
-  validate-ci:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+  publish-release:
+    needs:
+      - bootstrap
+      - release-please
+    if: >-
+      ${{ always() &&
+          needs.bootstrap.outputs.initial_release_published == 'true' &&
+          needs.release-please.result == 'success' &&
+          github.event_name == 'push' &&
+          startsWith(github.event.head_commit.message, 'chore(main): release nsx-tflite-micro ') }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       actions: read
       checks: read
     env:
-      RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout release commit
+      - name: Checkout release candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
 
-      - name: Wait for successful main CI
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate release candidate
+        id: candidate
         shell: bash
         run: |
           set -euo pipefail
-          release_sha="$(git rev-parse HEAD)"
+          version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
+          test "$version" = "$(tr -d '[:space:]' < version.txt)"
+          test "$version" = "$(jq -r '."."' .release-please-manifest.json)"
+          release_tag="v${version}"
+          if git ls-remote --exit-code origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
+            echo "Release tag ${release_tag} already exists; refusing to retarget it."
+            exit 1
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for successful main CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_sha="${GITHUB_SHA}"
           for attempt in $(seq 1 60); do
             runs="$(gh run list --workflow ci.yml --event push \
               --commit "$release_sha" \
@@ -130,7 +153,6 @@ jobs:
               sleep 30
               continue
             fi
-
             run_state="$(printf '%s' "$runs" | jq -r --arg id "$run_id" \
               '.[] | select((.databaseId|tostring) == $id) | "\(.status)|\(.conclusion)"')"
             case "$run_state" in
@@ -151,32 +173,20 @@ jobs:
           echo "Timed out waiting for CI on ${release_sha}."
           exit 1
 
-  github-release:
-    needs:
-      - release-please
-      - validate-ci
-    if: ${{ always() && needs.release-please.outputs.release_created == 'true' && needs.validate-ci.result == 'success' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
-    steps:
-      - name: Checkout release tag
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          fetch-depth: 0
-
-      - name: Validate tag and module version
+      - name: Create immutable annotated tag
+        env:
+          RELEASE_TAG: ${{ steps.candidate.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
-          test "$version" = "$(tr -d '[:space:]' < version.txt)"
-          test "$version" = "${RELEASE_TAG#v}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" "$GITHUB_SHA" -m "Release $RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
 
       - name: Create source archive
+        env:
+          RELEASE_TAG: ${{ steps.candidate.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -187,10 +197,13 @@ jobs:
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Upload source archive
+        env:
+          RELEASE_TAG: ${{ steps.candidate.outputs.release_tag }}
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: ${{ env.ARCHIVE }}
+          generate_release_notes: true
 
   validate-rebuild-ci:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
@@ -205,8 +218,8 @@ jobs:
       - name: Checkout release commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ env.RELEASE_TAG }}
-          fetch-depth: 1
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - name: Wait for successful tagged-commit CI
         env:
@@ -258,7 +271,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Validate release tag
@@ -269,6 +282,9 @@ jobs:
             v*) ;;
             *) echo "Expected an existing vMAJOR.MINOR.PATCH tag"; exit 1 ;;
           esac
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = "tag"
+          tagged_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$tagged_commit" = "$(git rev-parse HEAD)"
           version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
           test "$version" = "$(tr -d '[:space:]' < version.txt)"
           test "$version" = "${RELEASE_TAG#v}"
