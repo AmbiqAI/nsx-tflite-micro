@@ -43,6 +43,15 @@ jobs:
           git fetch --no-tags origin refs/tags/v0.1.0:refs/tags/v0.1.0
           test "$(git cat-file -t refs/tags/v0.1.0)" = "tag"
           tagged_commit="$(git rev-parse refs/tags/v0.1.0^{commit})"
+          pr_merged="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${INITIAL_RELEASE_PR}" \
+            --jq '.merged')"
+          test "$pr_merged" = "true"
+          merged_at="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${INITIAL_RELEASE_PR}" \
+            --jq '.merged_at')"
+          test -n "$merged_at"
+          test "$merged_at" != "null"
           reviewed_commit="$(gh api \
             "repos/${GITHUB_REPOSITORY}/pulls/${INITIAL_RELEASE_PR}" \
             --jq '.merge_commit_sha')"
@@ -85,7 +94,6 @@ jobs:
     if: ${{ needs.release-please.outputs.pr != '' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       actions: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,7 +120,6 @@ jobs:
     permissions:
       contents: write
       actions: read
-      checks: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -211,15 +218,30 @@ jobs:
     permissions:
       contents: read
       actions: read
-      checks: read
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+    outputs:
+      validated_sha: ${{ steps.validate-sha.outputs.validated_sha }}
     steps:
       - name: Checkout release commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
+
+      - name: Validate immutable tag target
+        id: validate-sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "Expected an existing vMAJOR.MINOR.PATCH tag"; exit 1 ;;
+          esac
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = "tag"
+          tagged_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$tagged_commit" = "$(git rev-parse HEAD)"
+          echo "validated_sha=${tagged_commit}" >> "$GITHUB_OUTPUT"
 
       - name: Wait for successful tagged-commit CI
         env:
@@ -267,6 +289,7 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+      VALIDATED_SHA: ${{ needs.validate-rebuild-ci.outputs.validated_sha }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -278,12 +301,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          case "$RELEASE_TAG" in
-            v*) ;;
-            *) echo "Expected an existing vMAJOR.MINOR.PATCH tag"; exit 1 ;;
-          esac
           test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = "tag"
           tagged_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$tagged_commit" = "$VALIDATED_SHA"
           test "$tagged_commit" = "$(git rev-parse HEAD)"
           version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
           test "$version" = "$(tr -d '[:space:]' < version.txt)"
