@@ -1,0 +1,149 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild its source archive
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+jobs:
+  bootstrap:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.tag == '') }}
+    runs-on: ubuntu-latest
+    outputs:
+      initial_release_published: ${{ steps.release-state.outputs.initial_release_published }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check for initial immutable tag
+        id: release-state
+        shell: bash
+        run: |
+          if git ls-remote --exit-code origin refs/tags/v0.1.0 >/dev/null 2>&1; then
+            echo "initial_release_published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "initial_release_published=false" >> "$GITHUB_OUTPUT"
+            echo "Initial v0.1.0 is not published; release automation remains gated."
+          fi
+
+  release-please:
+    needs: bootstrap
+    if: ${{ needs.bootstrap.result == 'success' && needs.bootstrap.outputs.initial_release_published == 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.tag == '')) }}
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # GITHUB_TOKEN-created PRs do not trigger pull_request workflows. Dispatch
+      # CI explicitly so the release PR has the same validation gate as normal
+      # pull requests.
+      - name: Dispatch CI on release PR branch
+        if: ${{ steps.release.outputs.pr }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          branch="$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')"
+          test -n "$branch"
+          gh workflow run ci.yml --ref "$branch" --repo "$GITHUB_REPOSITORY"
+
+  github-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Validate tag and module version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
+          test "$version" = "$(tr -d '[:space:]' < version.txt)"
+          test "$version" = "${RELEASE_TAG#v}"
+
+      - name: Create source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="nsx-tflite-micro-${RELEASE_TAG#v}.tar.gz"
+          git archive --format=tar.gz \
+            --prefix="nsx-tflite-micro-${RELEASE_TAG#v}/" \
+            "$RELEASE_TAG" -o "$archive"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Upload source archive
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ env.ARCHIVE }}
+
+  rebuild-archive:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "Expected an existing vMAJOR.MINOR.PATCH tag"; exit 1 ;;
+          esac
+          version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
+          test "$version" = "$(tr -d '[:space:]' < version.txt)"
+          test "$version" = "${RELEASE_TAG#v}"
+
+      - name: Create source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="nsx-tflite-micro-${RELEASE_TAG#v}.tar.gz"
+          git archive --format=tar.gz \
+            --prefix="nsx-tflite-micro-${RELEASE_TAG#v}/" \
+            "$RELEASE_TAG" -o "$archive"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Upload source archive
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ env.ARCHIVE }}

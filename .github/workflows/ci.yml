@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HELIA_RT_SOURCE_REVISION: 7c1b162c0fd2336876b69daaa20c87a1e7e2f508
+  ARM_CMSIS_NN_MODULE_REVISION: 41e0cf520fe68d5e22298f98e1a0ffda1196f8d8
+
+jobs:
+  metadata:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate version and release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^  version: "\(.*\)"/\1/p' nsx-module.yaml | head -1)"
+          semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          [[ "$version" =~ $semver_re ]]
+          version_file="$(tr -d '[:space:]' < version.txt)"
+          test "$version" = "$version_file"
+          manifest_version="$(jq -r '."."' .release-please-manifest.json)"
+          test "$version" = "$manifest_version"
+          grep -qE '^## \[[0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md
+          grep -qF '7c1b162c0fd2336876b69daaa20c87a1e7e2f508' PROVENANCE.md
+          grep -qF 'nsx::tflite_micro' README.md
+          grep -qF 'vMAJOR.MINOR.PATCH' RELEASE.md
+
+      - name: Run CMake metadata contract
+        run: cmake -P tests/validate_release.cmake
+
+  host-reference:
+    name: Host reference build and link smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout pinned Helia-RT source
+        uses: actions/checkout@v4
+        with:
+          repository: AmbiqAI/helia-rt
+          ref: ${{ env.HELIA_RT_SOURCE_REVISION }}
+          path: helia-rt-source
+          fetch-depth: 1
+
+      - name: Configure reference smoke
+        run: |
+          cmake -S tests/smoke -B build/reference \
+            -DTFLITE_MICRO_ROOT="$GITHUB_WORKSPACE/helia-rt-source" \
+            -DNSX_TFLITE_MICRO_BACKEND=reference
+
+      - name: Build reference smoke
+        run: cmake --build build/reference --parallel 2
+
+  backend-contract:
+    name: Configure CMSIS-NN contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout pinned Helia-RT source
+        uses: actions/checkout@v4
+        with:
+          repository: AmbiqAI/helia-rt
+          ref: ${{ env.HELIA_RT_SOURCE_REVISION }}
+          path: helia-rt-source
+          fetch-depth: 1
+
+      - name: Checkout pinned Arm CMSIS-NN module
+        uses: actions/checkout@v4
+        with:
+          repository: AmbiqAI/arm-cmsis-nn
+          ref: ${{ env.ARM_CMSIS_NN_MODULE_REVISION }}
+          path: arm-cmsis-nn
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Configure CMSIS-NN smoke
+        run: |
+          cmake -S tests/smoke -B build/cmsis-nn \
+            -DTFLITE_MICRO_ROOT="$GITHUB_WORKSPACE/helia-rt-source" \
+            -DNSX_TFLITE_MICRO_BACKEND=cmsis_nn \
+            -DNSX_TFLITE_MICRO_SMOKE_ARM_CMSIS_NN_ROOT="$GITHUB_WORKSPACE/arm-cmsis-nn"
+
+      - name: Build CMSIS-NN smoke
+        run: cmake --build build/cmsis-nn --parallel 2
